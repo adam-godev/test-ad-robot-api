@@ -1,0 +1,31 @@
+[tool.poetry]
+name = "keitaro-campaign-tool-backend"
+version = "0.1.0"
+description = "FastAPI backend for creating and editing Keitaro campaigns"
+authors = ["Test Assignment"]
+readme = "README.md"
+packages = [{ include = "app" }]
+
+[tool.poetry.dependencies]
+python = ">=3.12,<3.13"
+fastapi = "^0.115.6"
+uvicorn = { extras = ["standard"], version = "^0.34.0" }
+sqlalchemy = "^2.0.36"
+alembic = "^1.14.0"
+psycopg = { extras = ["binary"], version = "^3.2.3" }
+pydantic-settings = "^2.7.1"
+httpx = "^0.28.1"
+python-dotenv = "^1.0.1"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.4"
+pytest-cov = "^6.0.0"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q -p no:cacheprovider"
