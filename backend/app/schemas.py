@@ -96,7 +96,7 @@ class CampaignListItem(BaseModel):
     status: str
     pending_action: str | None = None
     metrics: dict | None = None
-    stream_count: int = 0
+    stream_count: int | None = None
     has_pending_changes: bool = False
     created_at: datetime
     updated_at: datetime

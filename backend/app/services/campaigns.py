@@ -2,6 +2,7 @@ import time
 from typing import Any
 
 from sqlalchemy import Select, case, desc, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
@@ -33,6 +34,7 @@ from app.services.weights import (
 class CampaignService:
     DEFAULT_REDIRECT_URL = "https://google.com"
     REPORT_TIMEZONE = "Europe/Berlin"
+    STREAMS_LOADED_FLAG = "_ad_robot_streams_loaded"
     PENDING_OFFER_ACTIONS = {"add", "remove", "restore"}
     INACTIVE_OFFER_ACTIONS = {"remove", "removed"}
 
@@ -142,7 +144,7 @@ class CampaignService:
             campaign.traffic_source_id = (
                 kt_campaign.traffic_source_id or self.settings.keitaro_traffic_source_id
             )
-            campaign.kt_payload = kt_campaign.payload or {}
+            campaign.kt_payload = {**(kt_campaign.payload or {}), self.STREAMS_LOADED_FLAG: True}
             self.db.commit()
 
             flow1_stream = self.keitaro.create_stream(
@@ -225,7 +227,9 @@ class CampaignService:
         synced_campaign_ids: set[int] = set()
         for kt_campaign in kt_campaigns:
             synced_campaign_ids.add(kt_campaign.id)
-            campaign, campaign_counts = self._sync_keitaro_campaign(kt_campaign)
+            campaign, campaign_counts = self._sync_keitaro_campaign_metadata(
+                kt_campaign
+            )
             for key, value in campaign_counts.items():
                 counts[key] += value
 
@@ -262,6 +266,7 @@ class CampaignService:
             .where(visible_campaigns)
             .order_by(
                 case((Campaign.pending_action == "delete", 1), else_=0),
+                desc(Campaign.keitaro_campaign_id).nulls_last(),
                 desc(Campaign.created_at),
             )
             .limit(limit)
@@ -751,41 +756,14 @@ class CampaignService:
         alias = kt_campaign.alias or f"kt-{kt_campaign.id}"
         campaign_payload = kt_campaign.payload or {}
         if campaign is None:
-            campaign = Campaign(
-                keitaro_campaign_id=kt_campaign.id,
-                name=kt_campaign.name or f"Campaign {kt_campaign.id}",
-                alias=alias,
-                campaign_url=self._build_campaign_url(
-                    self._campaign_domain_url(), alias
-                ),
-                geo_codes=[],
-                domain_id=kt_campaign.domain_id,
-                domain_url=self._campaign_domain_url(),
-                group_id=kt_campaign.group_id,
-                traffic_source_id=kt_campaign.traffic_source_id,
-                status=kt_campaign.state or "active",
-                pending_action=None,
-                metrics=self._metrics_from_payload(campaign_payload),
-                kt_payload=campaign_payload,
+            campaign, imported = self._insert_or_get_keitaro_campaign(
+                kt_campaign, alias, campaign_payload
             )
-            self.db.add(campaign)
-            self.db.flush()
-            counts["campaigns_imported"] += 1
+            counts["campaigns_imported"] += int(imported)
         else:
-            campaign.name = kt_campaign.name or campaign.name
-            campaign.alias = alias
-            campaign.campaign_url = self._build_campaign_url(
-                self._campaign_domain_url(), alias
+            self._apply_keitaro_campaign_metadata(
+                campaign, kt_campaign, alias, campaign_payload
             )
-            campaign.domain_id = kt_campaign.domain_id or campaign.domain_id
-            campaign.group_id = kt_campaign.group_id or campaign.group_id
-            campaign.traffic_source_id = (
-                kt_campaign.traffic_source_id or campaign.traffic_source_id
-            )
-            if campaign.pending_action != "delete":
-                campaign.status = kt_campaign.state or campaign.status
-            campaign.metrics = self._metrics_from_payload(campaign_payload)
-            campaign.kt_payload = campaign_payload
 
         try:
             streams = self.keitaro.get_campaign_streams(kt_campaign.id)
@@ -930,43 +908,94 @@ class CampaignService:
         campaign_payload = kt_campaign.payload or {}
 
         if campaign is None:
-            campaign = Campaign(
-                keitaro_campaign_id=kt_campaign.id,
-                name=kt_campaign.name or f"Campaign {kt_campaign.id}",
-                alias=alias,
-                campaign_url=self._build_campaign_url(
-                    self._campaign_domain_url(), alias
-                ),
-                geo_codes=[],
-                domain_id=kt_campaign.domain_id,
-                domain_url=self._campaign_domain_url(),
-                group_id=kt_campaign.group_id,
-                traffic_source_id=kt_campaign.traffic_source_id,
-                status=kt_campaign.state or "active",
-                pending_action=None,
-                metrics=self._metrics_from_payload(campaign_payload),
-                kt_payload=campaign_payload,
+            campaign, imported = self._insert_or_get_keitaro_campaign(
+                kt_campaign, alias, campaign_payload
             )
-            self.db.add(campaign)
-            self.db.flush()
-            counts["campaigns_imported"] += 1
+            counts["campaigns_imported"] += int(imported)
         else:
-            campaign.name = kt_campaign.name or campaign.name
-            campaign.alias = alias
-            campaign.campaign_url = self._build_campaign_url(
-                self._campaign_domain_url(), alias
+            self._apply_keitaro_campaign_metadata(
+                campaign, kt_campaign, alias, campaign_payload
             )
-            campaign.domain_id = kt_campaign.domain_id or campaign.domain_id
-            campaign.group_id = kt_campaign.group_id or campaign.group_id
-            campaign.traffic_source_id = (
-                kt_campaign.traffic_source_id or campaign.traffic_source_id
-            )
-            if campaign.pending_action != "delete":
-                campaign.status = kt_campaign.state or campaign.status
-            campaign.metrics = self._metrics_from_payload(campaign_payload)
-            campaign.kt_payload = campaign_payload
 
         return campaign, counts
+
+    def _insert_or_get_keitaro_campaign(
+        self,
+        kt_campaign: KeitaroCampaign,
+        alias: str,
+        campaign_payload: dict[str, Any],
+    ) -> tuple[Campaign, bool]:
+        campaign = Campaign(
+            keitaro_campaign_id=kt_campaign.id,
+            name=kt_campaign.name or f"Campaign {kt_campaign.id}",
+            alias=alias,
+            campaign_url=self._build_campaign_url(self._campaign_domain_url(), alias),
+            geo_codes=[],
+            domain_id=kt_campaign.domain_id,
+            domain_url=self._campaign_domain_url(),
+            group_id=kt_campaign.group_id,
+            traffic_source_id=kt_campaign.traffic_source_id,
+            status=kt_campaign.state or "active",
+            pending_action=None,
+            metrics=self._metrics_from_payload(campaign_payload),
+            kt_payload=campaign_payload,
+        )
+        try:
+            with self.db.begin_nested():
+                self.db.add(campaign)
+                self.db.flush()
+        except IntegrityError as exc:
+            if not self._is_keitaro_campaign_unique_violation(exc):
+                raise
+            existing = self.db.scalar(
+                select(Campaign).where(
+                    Campaign.keitaro_campaign_id == kt_campaign.id
+                )
+            )
+            if existing is None:
+                raise
+            self._apply_keitaro_campaign_metadata(
+                existing, kt_campaign, alias, campaign_payload
+            )
+            return existing, False
+        return campaign, True
+
+    def _apply_keitaro_campaign_metadata(
+        self,
+        campaign: Campaign,
+        kt_campaign: KeitaroCampaign,
+        alias: str,
+        campaign_payload: dict[str, Any],
+    ) -> None:
+        campaign.name = kt_campaign.name or campaign.name
+        campaign.alias = alias
+        campaign.campaign_url = self._build_campaign_url(
+            self._campaign_domain_url(), alias
+        )
+        campaign.domain_id = kt_campaign.domain_id or campaign.domain_id
+        campaign.group_id = kt_campaign.group_id or campaign.group_id
+        campaign.traffic_source_id = (
+            kt_campaign.traffic_source_id or campaign.traffic_source_id
+        )
+        if campaign.pending_action != "delete":
+            campaign.status = kt_campaign.state or campaign.status
+        streams_loaded = self._campaign_streams_loaded(campaign)
+        campaign.metrics = self._metrics_from_payload(campaign_payload)
+        campaign.kt_payload = dict(campaign_payload)
+        if streams_loaded:
+            self._mark_campaign_streams_loaded(campaign)
+
+    @staticmethod
+    def _is_keitaro_campaign_unique_violation(exc: IntegrityError) -> bool:
+        diagnostic = getattr(exc.orig, "diag", None)
+        constraint_name = getattr(diagnostic, "constraint_name", None)
+        if constraint_name == "campaigns_keitaro_campaign_id_key":
+            return True
+        message = str(exc.orig)
+        return (
+            "campaigns_keitaro_campaign_id_key" in message
+            or "campaigns.keitaro_campaign_id" in message
+        )
 
     def _hydrate_keitaro_stream(self, stream: Any) -> Any:
         has_metrics = bool(self._metrics_from_payload(stream.payload or {}))
@@ -1038,13 +1067,28 @@ class CampaignService:
                 "status": self._campaign_status(campaign),
                 "pending_action": campaign.pending_action,
                 "metrics": campaign.metrics or {},
-                "stream_count": len(campaign.flows),
+                "stream_count": self._campaign_stream_count(campaign),
                 "has_pending_changes": self._campaign_has_pending_changes(campaign),
                 "created_at": campaign.created_at,
                 "updated_at": campaign.updated_at,
             }
         )
 
+    def _campaign_stream_count(self, campaign: Campaign) -> int | None:
+        if campaign.flows or self._campaign_streams_loaded(campaign):
+            return len(campaign.flows)
+        return None
+
+    def _campaign_streams_loaded(self, campaign: Campaign) -> bool:
+        return bool(
+            isinstance(campaign.kt_payload, dict)
+            and campaign.kt_payload.get(self.STREAMS_LOADED_FLAG)
+        )
+
+    def _mark_campaign_streams_loaded(self, campaign: Campaign) -> None:
+        payload = dict(campaign.kt_payload or {})
+        payload[self.STREAMS_LOADED_FLAG] = True
+        campaign.kt_payload = payload
     def _campaign_status(self, campaign: Campaign) -> str:
         if campaign.pending_action:
             return campaign.status
@@ -1248,7 +1292,7 @@ class CampaignService:
             payload["name"] = flow.name
             payload["position"] = flow.position
             payload["state"] = flow.status or payload.get("state") or "active"
-            payload["schema"] = payload.get("schema") or "offers"
+            payload["schema"] = payload.get("schema") or "landings"
             payload["offers"] = offer_rows
             action_payload = payload.get("action_payload")
             if isinstance(action_payload, dict):
@@ -1637,7 +1681,7 @@ class CampaignService:
     def _keitaro_admin_url(self, campaign: Campaign) -> str | None:
         if campaign.keitaro_campaign_id is None:
             return None
-        return f"{self.settings.keitaro_base_url.rstrip('/')}/admin/campaigns/{campaign.keitaro_campaign_id}"
+        return f"{self.settings.keitaro_base_url.rstrip('/')}/admin/#!/campaigns/{campaign.keitaro_campaign_id}"
 
     @staticmethod
     def _build_campaign_url(domain_url: str, alias: str) -> str:
@@ -1678,4 +1722,23 @@ class CampaignService:
         status_code, code = mapping.get(
             exc.http_status or 0, (502, "KEITARO_BAD_RESPONSE")
         )
-        return AppError(status_code, code, str(exc), exc.details)
+        message = (
+            CampaignService._keitaro_validation_message(exc.details)
+            if exc.http_status == 422
+            else str(exc)
+        )
+        return AppError(status_code, code, message, exc.details)
+
+    @staticmethod
+    def _keitaro_validation_message(details: Any | None) -> str:
+        env_fields = {
+            "domain_id": "KEITARO_DOMAIN_ID",
+            "group_id": "KEITARO_GROUP_ID",
+            "traffic_source_id": "KEITARO_TRAFFIC_SOURCE_ID",
+        }
+        if isinstance(details, dict):
+            env_names = [env_name for field, env_name in env_fields.items() if field in details]
+            if env_names:
+                joined = ", ".join(env_names)
+                return f"Keitaro rejected environment configuration. Check {joined} in .env."
+        return "Keitaro rejected payload"

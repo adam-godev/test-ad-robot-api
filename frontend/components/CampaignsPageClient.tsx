@@ -248,7 +248,7 @@ export default function CampaignsPage() {
                       <span className={`badge ${changed || pendingDelete ? "badge-amber" : "badge-green"}`}>
                         {pendingDelete ? "delete" : changed ? "changed" : campaign.status}
                       </span>
-                      <span className="badge">{campaign.stream_count} streams</span>
+                      {campaign.stream_count !== null ? <span className="badge">{campaign.stream_count} streams</span> : null}
                     </div>
                   </div>
                 );

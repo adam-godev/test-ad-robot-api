@@ -133,14 +133,42 @@ class KeitaroClient:
             return None
 
     @staticmethod
+    def _optional_text(value: Any) -> str | None:
+        if value is None or value == "":
+            return None
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            parts = [KeitaroClient._optional_text(item) for item in value]
+            return ", ".join(part for part in parts if part) or None
+        if isinstance(value, dict):
+            parts = []
+            for key in ("name", "title", "value", "code", "id"):
+                if key in value:
+                    part = KeitaroClient._optional_text(value.get(key))
+                    if part and part not in parts:
+                        parts.append(part)
+            if parts:
+                return " ".join(parts)
+            return json.dumps(value, ensure_ascii=False, sort_keys=True)
+        return str(value)
+
+    @staticmethod
     def _offer_from_payload(payload: dict[str, Any]) -> KeitaroOffer:
         return KeitaroOffer(
             id=int(payload["id"]),
-            name=str(payload.get("name") or payload.get("title") or payload["id"]),
-            country=payload.get("country"),
-            state=payload.get("state"),
-            affiliate_network=payload.get("affiliate_network") or payload.get("network"),
-            url=payload.get("url") or payload.get("action_payload"),
+            name=KeitaroClient._optional_text(
+                payload.get("name") or payload.get("title") or payload["id"]
+            )
+            or str(payload["id"]),
+            country=KeitaroClient._optional_text(payload.get("country")),
+            state=KeitaroClient._optional_text(payload.get("state")),
+            affiliate_network=KeitaroClient._optional_text(
+                payload.get("affiliate_network") or payload.get("network")
+            ),
+            url=KeitaroClient._optional_text(
+                payload.get("url") or payload.get("action_payload")
+            ),
         )
 
     def get_offer(self, offer_id: int) -> KeitaroOffer:
@@ -168,9 +196,9 @@ class KeitaroClient:
             for offer in offers
             if query_lower in str(offer.id).lower()
             or query_lower in offer.name.lower()
-            or query_lower in (offer.country or "").lower()
-            or query_lower in (offer.affiliate_network or "").lower()
-            or query_lower in (offer.state or "").lower()
+            or query_lower in (self._optional_text(offer.country) or "").lower()
+            or query_lower in (self._optional_text(offer.affiliate_network) or "").lower()
+            or query_lower in (self._optional_text(offer.state) or "").lower()
         ]
         return filtered[:limit]
 

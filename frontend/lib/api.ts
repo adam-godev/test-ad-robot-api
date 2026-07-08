@@ -120,7 +120,7 @@ export type CampaignListItem = {
   status: string;
   pending_action?: string | null;
   metrics?: Record<string, unknown> | null;
-  stream_count: number;
+  stream_count: number | null;
   has_pending_changes?: boolean;
   created_at: string;
   updated_at: string;

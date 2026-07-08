@@ -23,7 +23,7 @@ def test_successful_campaign_creation_creates_campaign_and_two_flows(
     body = response.json()
     assert body["name"] == "campaign 2"
     assert body["campaign_url"] == "https://tracker.test/wVqN1R"
-    assert body["keitaro_admin_url"] == "https://keitaro.test/admin/campaigns/101"
+    assert body["keitaro_admin_url"] == "https://keitaro.test/admin/#!/campaigns/101"
     assert body["geo_codes"] == ["AU"]
     assert [flow["name"] for flow in body["flows"]] == ["Flow 2", "Flow 1"]
     assert flow_by_name(body, "Flow 1")["redirect_url"] == "https://google.com"
@@ -33,6 +33,14 @@ def test_successful_campaign_creation_creates_campaign_and_two_flows(
     assert fake_keitaro.campaign_payloads[0]["group_id"] == 22
     assert fake_keitaro.campaign_payloads[0]["traffic_source_id"] == 33
     assert fake_keitaro.stream_payloads[0]["filters"][0]["payload"] == ["AU"]
+    assert "operator" not in fake_keitaro.stream_payloads[0]["filters"][0]
+    assert fake_keitaro.stream_payloads[0]["action_type"] == "http"
+    assert fake_keitaro.stream_payloads[0]["action_payload"] == "https://google.com"
+    assert "redirect_url" not in fake_keitaro.stream_payloads[0]
+    assert fake_keitaro.stream_payloads[1]["schema"] == "landings"
+    assert fake_keitaro.stream_payloads[1]["action_type"] == "http"
+    assert fake_keitaro.stream_payloads[1]["action_payload"] == ""
+    assert fake_keitaro.stream_payloads[1]["offer_selection"] == "before_click"
     assert fake_keitaro.stream_payloads[1]["offers"] == [{"offer_id": 3749, "share": 100}]
 
 
@@ -193,7 +201,79 @@ def test_fetch_from_keitaro_imports_campaign_list_without_stream_contents(
     assert fake_keitaro.report_requests == []
     item = listed.json()["items"][0]
     assert item["name"] == "Imported shell campaign"
-    assert item["stream_count"] == 0
+    assert item["stream_count"] is None
+
+
+def test_campaign_list_shows_stream_count_after_detail_refresh(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    fake_keitaro,
+) -> None:
+    fake_keitaro.campaigns[501] = KeitaroCampaign(
+        id=501,
+        name="Imported shell campaign",
+        alias="imported-shell",
+        state="active",
+        payload={"id": 501, "name": "Imported shell campaign", "alias": "imported-shell"},
+    )
+    fake_keitaro.streams.append(
+        KeitaroStream(
+            id=701,
+            name="Loaded stream",
+            position=1,
+            state="active",
+            schema="redirect",
+            offers=[],
+            payload={"id": 701, "name": "Loaded stream", "action_payload": "https://google.com"},
+        )
+    )
+
+    client.post("/api/campaigns/fetch-from-kt", headers=auth_headers)
+    before = client.get("/api/campaigns", headers=auth_headers)
+    campaign_id = before.json()["items"][0]["id"]
+    detail = client.get(f"/api/campaigns/{campaign_id}?refresh=true", headers=auth_headers)
+    after = client.get("/api/campaigns", headers=auth_headers)
+
+    assert before.json()["items"][0]["stream_count"] is None
+    assert detail.status_code == 200
+    assert after.json()["items"][0]["stream_count"] == 1
+
+    client.post("/api/campaigns/fetch-from-kt", headers=auth_headers)
+    after_refetch = client.get("/api/campaigns", headers=auth_headers)
+
+    assert after_refetch.json()["items"][0]["stream_count"] == 1
+
+
+def test_fetch_from_keitaro_updates_existing_campaign_without_duplicate(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    fake_keitaro,
+) -> None:
+    fake_keitaro.campaigns[501] = KeitaroCampaign(
+        id=501,
+        name="Imported shell campaign",
+        alias="imported-shell",
+        state="active",
+        payload={"id": 501, "name": "Imported shell campaign", "alias": "imported-shell"},
+    )
+
+    first = client.post("/api/campaigns/fetch-from-kt", headers=auth_headers)
+    fake_keitaro.campaigns[501] = KeitaroCampaign(
+        id=501,
+        name="Imported shell campaign updated",
+        alias="imported-shell",
+        state="active",
+        payload={"id": 501, "name": "Imported shell campaign updated", "alias": "imported-shell"},
+    )
+    second = client.post("/api/campaigns/fetch-from-kt", headers=auth_headers)
+    listed = client.get("/api/campaigns", headers=auth_headers)
+
+    assert first.status_code == 200
+    assert first.json() == {"campaigns_imported": 1, "flows_imported": 0, "offers_imported": 0}
+    assert second.status_code == 200
+    assert second.json() == {"campaigns_imported": 0, "flows_imported": 0, "offers_imported": 0}
+    assert listed.json()["total"] == 1
+    assert listed.json()["items"][0]["name"] == "Imported shell campaign updated"
 
 
 def test_idempotency_key_returns_previous_result(

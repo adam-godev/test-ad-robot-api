@@ -3,6 +3,7 @@ import re
 import pytest
 
 from app.core.config import Settings
+from app.integrations.keitaro.client import KeitaroClient, KeitaroError
 from app.services.campaigns import CampaignService
 from app.services.aliases import generate_alias
 from app.services.geo import normalize_geo_codes
@@ -116,3 +117,39 @@ def test_report_metrics_select_matching_campaign_row() -> None:
     assert stats["cost"] == 142.69
     assert stats["profit"] == 1009.23
     assert round(stats["cr"], 2) == 15.04
+
+
+def test_keitaro_offer_search_handles_list_fields() -> None:
+    class SearchClient(KeitaroClient):
+        def __init__(self) -> None:
+            pass
+
+        def _request(self, method: str, path: str, **kwargs):
+            return [
+                {
+                    "id": 123,
+                    "name": "Offer 123",
+                    "country": ["RO", "PL"],
+                    "state": ["active"],
+                    "affiliate_network": ["Miaflow"],
+                }
+            ]
+
+    offers = SearchClient().search_offers("pl", 20)
+
+    assert len(offers) == 1
+    assert offers[0].country == "RO, PL"
+    assert offers[0].state == "active"
+    assert offers[0].affiliate_network == "Miaflow"
+
+def test_keitaro_validation_error_names_env_fields() -> None:
+    error = KeitaroError(
+        "Keitaro rejected payload",
+        http_status=422,
+        details={"group_id": ["does not exist"]},
+    )
+
+    app_error = CampaignService._keitaro_to_app_error(error)
+
+    assert app_error.code == "KEITARO_VALIDATION_ERROR"
+    assert app_error.message == "Keitaro rejected environment configuration. Check KEITARO_GROUP_ID in .env."

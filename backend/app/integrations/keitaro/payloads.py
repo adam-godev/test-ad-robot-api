@@ -35,13 +35,12 @@ def flow_1_payload(*, campaign_id: int, geo_codes: list[str], redirect_url: str)
         "position": 1,
         "state": "active",
         "schema": "redirect",
-        "action_type": "http_redirect",
-        "redirect_url": redirect_url,
+        "action_type": "http",
+        "action_payload": redirect_url,
         "filters": [
             {
                 "name": "country",
                 "mode": "accept",
-                "operator": "in",
                 "payload": geo_codes,
             }
         ],
@@ -55,7 +54,10 @@ def flow_2_payload(*, campaign_id: int, offers: list[dict[str, int]]) -> dict[st
         "type": "regular",
         "position": 2,
         "state": "active",
-        "schema": "offers",
+        "schema": "landings",
+        "action_type": "http",
+        "action_payload": "",
+        "offer_selection": "before_click",
         "filters": [],
         "offers": [{"offer_id": offer["offer_id"], "share": offer["weight"]} for offer in offers],
     }
@@ -74,7 +76,10 @@ def offers_stream_update_payload(
         "type": "regular",
         "position": position,
         "state": "active",
-        "schema": "offers",
+        "schema": "landings",
+        "action_type": "http",
+        "action_payload": "",
+        "offer_selection": "before_click",
         "filters": [],
         "offers": [{"offer_id": offer["offer_id"], "share": offer["weight"]} for offer in offers],
     }
